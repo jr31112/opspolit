@@ -7,25 +7,24 @@ Spring API를 하나의 서비스로 삼아 애플리케이션 개발부터 인�
 OpsPilot은 애플리케이션과 플랫폼을 분리된 작업으로 보지 않습니다. 하나의 저장소에서 API를 개발하고, 컨테이너화하고, Kubernetes 환경에 배포한 뒤, 관측과 장애 대응까지 검증하는 것을 목표로 합니다.
 
 ```text
-Application
-    Spring Boot + JPA + MySQL
-                    |
-                    v
-Container
-    Docker + Docker Hub
-                    |
-                    v
-Platform
-    Terraform + AWS + K3s
-                    |
-                    v
-Operations
-    CI/CD + Monitoring + HPA + DR
+Application: Spring Boot + JPA + MySQL
+    |
+    v
+CI/CD: GitHub Actions + Docker Hub -> Newly Provisioned K3s
+    |
+    v
+Operations: Monitoring + CPU / Memory Load + HPA
+    |
+    v
+Infrastructure as Code: Terraform + AWS + K3s
+    |
+    v
+Resilience: Multi-AZ + RDS + DR
 ```
 
 ## Architecture Plan
 
-현재는 로컬 환경에서 Spring API와 MySQL을 검증하고 있습니다. 이후 최소 비용의 단일 인스턴스 환경에서 시작해, 리소스 여유가 생기면 관측 시스템을 추가하고, 마지막에 데이터베이스와 장애 도메인을 분리합니다.
+K3s 클러스터를 새로 구성해 실행 중이며, 현재 우선순위는 이 클러스터에 OpsPilot을 배포하는 것입니다. 기본 nginx로는 HPA 검증에 필요한 CPU·메모리 부하를 만들기 어려워, 의도적으로 부하를 발생시키는 Spring 애플리케이션을 사용합니다. CI/CD로 배포를 연결하고 HPA 동작을 확인한 뒤, Terraform으로 인프라를 코드화하고 마지막에 데이터베이스와 장애 도메인을 분리합니다.
 
 ### Stage 0. Local Architecture
 
@@ -38,52 +37,50 @@ Spring Boot App :8080  -------->  MySQL :3306
        app container                  mysql container
 ```
 
-### Stage 1. Infrastructure Architecture
+### Stage 1. Delivery to Newly Provisioned K3s
 
-Terraform으로 AWS의 `t3.small` 인스턴스 1개를 생성하고, 해당 인스턴스에 단일 노드 K3s 클러스터를 구성합니다. 애플리케이션과 MySQL은 Docker 이미지를 사용해 같은 K3s 클러스터 안에서 실행합니다.
-
-```text
-                       Terraform
-                           |
-                           v
-                   AWS EC2: t3.small
-                           |
-                           v
-                  Single-node K3s Cluster
-                    /                    \
-                   /                      \
-        Spring API Deployment       MySQL Deployment
-                   |                      |
-                   v                      v
-             Spring API Service     MySQL Service
-```
-
-### Stage 2. Delivery and Observability Architecture
-
-코드 변경을 테스트, 이미지 빌드, Docker Hub push, K3s 배포까지 연결합니다. HPA와 DR 검증에 필요한 관측 기반을 확보하기 위해 모니터링은 제외하지 않고, 단일 인스턴스에서도 동작할 수 있도록 경량 구성으로 운영합니다.
+GitHub Actions로 테스트, Docker 이미지 빌드, Docker Hub push, 새로 구성한 K3s 배포까지 연결합니다. 새로 구성해 실행 중인 K3s 클러스터를 배포 대상으로 사용하고, Terraform 코드화는 HPA 검증 이후에 진행합니다.
 
 ```text
 GitHub Repository
-       |
-       v
-GitHub Actions
-  |-- Test
-  |-- Docker Build
-  `-- Push to Docker Hub
-       |
-       v
-K3s Cluster
-  |-- Spring API
-  |-- MySQL
-     |-- Metrics Server <----- HPA resource metrics
-     |-- Prometheus <----- Application / Node Metrics
-     `-- Grafana   <----- Prometheus
-       |
-       v
-     Dashboard / Alert
+    |
+    v
+GitHub Actions: Test -> Docker Build -> Push to Docker Hub
+    |
+    v
+Newly Provisioned K3s Cluster
+    |-- Spring API Deployment / Service
+    `-- MySQL connection
 ```
 
-### Stage 3. Resilience Architecture
+### Stage 2. Observability and HPA Validation
+
+배포한 앱의 CPU·메모리 테스트 API로 부하를 만들고 HPA의 Pod 확장과 축소를 관측합니다. Metrics Server와 경량 Prometheus / Grafana를 연결해 리소스 사용량과 애플리케이션 지표를 확인합니다.
+
+```text
+Load requests -> Spring API Pods <- HPA
+                    |                ^
+                    |                |
+                    |          Metrics Server
+                    v
+              Prometheus -> Grafana
+```
+
+### Stage 3. Infrastructure as Code
+
+배포와 HPA 검증 이후 Terraform으로 AWS 리소스와 K3s 실행 기반을 코드화합니다. 최소 비용의 `t3.small` 단일 인스턴스 구성을 기준으로, 현재 인프라와 목표 구성의 차이를 확인하고 재현 가능한 환경을 만듭니다. 기존 자원은 관리 대상으로 가져올지 별도 환경으로 재구성할지 결정합니다.
+
+```text
+Terraform -> AWS EC2 / Network -> K3s
+                                  |
+                                  v
+                       Existing CI/CD pipeline
+                                  |
+                                  v
+                           Spring API / MySQL
+```
+
+### Stage 4. Resilience Architecture
 
 EC2 인스턴스를 AZ별로 1대씩 구성하고, 데이터베이스는 AWS RDS MySQL로 분리합니다. AZ-A는 K3s 관리 노드, 모니터링, 애플리케이션을 담당하며 RDS MySQL의 기본 배치 영역도 AZ-A로 구성합니다. AZ-B는 애플리케이션만 실행합니다. 외부 트래픽은 `ALB -> EC2 -> K3s NodePort -> Application Pod` 경로로 전달하며, ALB health check가 AZ-B 장애를 감지하면 AZ-A NodePort로 요청을 전환합니다.
 
@@ -134,18 +131,18 @@ Data:    AZ-A/B Application -> RDS MySQL (primary / preferred AZ-A)
 | 단계 | 배포 대상 | 운영 검증 |
 | --- | --- | --- |
 | 0단계 | Docker Compose의 Spring API와 MySQL | API 실행 및 로컬 테스트 |
-| 1단계 | `t3.small` 1대의 단일 노드 K3s와 API / MySQL | 클러스터 연결 및 서비스 접근 |
-| 2단계 | GitHub Actions, Docker Hub, Metrics Server, 경량 Prometheus / Grafana | 자동 배포와 HPA/DR을 위한 관측 |
-| 3단계 | EC2 2대, ALB, NodePort, K3s 관리(AZ-A), 애플리케이션(AZ-A/B), RDS MySQL | AZ-B 단절 후 AZ-A failover, RDS 정상 동작 전제 |
+| 1단계 | GitHub Actions, Docker Hub, 새로 구성한 K3s | 테스트·이미지 빌드·앱 자동 배포 |
+| 2단계 | 장애 테스트 API, HPA, Metrics Server, Prometheus / Grafana | CPU·메모리 부하와 Pod 확장·축소 |
+| 3단계 | Terraform, AWS, K3s 실행 기반 | 인프라 코드화와 재현 가능성 |
+| 4단계 | EC2 2대, ALB, NodePort, RDS MySQL | AZ-B 단절 후 AZ-A failover, RDS 정상 동작 전제 |
 
 ## Current Status
 
-| 단계 | 주제 | 상태 |
-| --- | --- | --- |
-| 0단계 | Spring API 기본 구현 및 로컬 실행 환경 | 완료 |
-| 1단계 | Terraform 기반 인프라와 K3s 연결 | 예정 |
-| 2단계 | CI/CD 및 모니터링 구축 | 예정 |
-| 3단계 | 고도화: HPA 검증 및 DR 테스트 | 예정 |
+- [x] 0단계: Spring API 및 장애 테스트 API, 로컬 테스트
+- [ ] 1단계: CI/CD 구축 및 K3s에 OpsPilot 배포
+- [ ] 2단계: 모니터링 연결 및 CPU·메모리 HPA 검증
+- [ ] 3단계: Terraform 기반 인프라 코드화
+- [ ] 4단계: Multi-AZ 구성 및 DR 테스트
 
 ## Stage 0. Application Baseline
 
@@ -208,12 +205,104 @@ docker compose down
 ./gradlew test
 ```
 
-## Stage 1. Infrastructure and K3s
+## Stage 1. CI/CD and Application Deployment
 
-`t3.small` 인스턴스 1개를 기준으로 최소 구성을 먼저 완성합니다. 한 노드 안에서 K3s, Spring API, MySQL을 실행해 애플리케이션 배포와 기본 운영 방식을 검증합니다.
+코드 변경이 테스트, 이미지 빌드, Docker Hub push, 새로 구성한 K3s 배포로 이어지는 CI/CD를 구축합니다. CPU·메모리 부하를 직접 발생시킬 수 있는 OpsPilot을 먼저 배포해 다음 단계의 HPA 검증에 사용합니다.
+
+### CI/CD
+
+- GitHub Actions로 테스트 자동화
+- Docker 이미지 빌드 및 Docker Hub push
+- 커밋 또는 태그 기반 이미지 버전 관리
+- GitHub Actions에서 K3s 배포 단계 자동화
+- 배포 실패 시 원인 확인과 롤백 절차 검증
+- Jenkins는 별도 서버 비용과 운영 부담을 고려해 초기 구성에서 사용하지 않음
+
+### CD Strategy
+
+```text
+GitHub Actions
+     |-- Test
+     |-- Build Docker Image
+     |-- Push Image to Docker Hub
+     `-- Deploy with kubectl / SSH
+                                   |
+                                   v
+                         K3s Cluster
+```
+
+현재 규모에서는 Jenkins를 별도로 띄우기보다 GitHub Actions를 CI/CD에 함께 사용합니다. Jenkins는 파이프라인이 복잡해지거나 self-hosted 실행 환경과 세밀한 권한 관리가 필요해질 때 검토합니다.
+
+### Tech Stack
+
+| 영역 | 기술 |
+| --- | --- |
+| CI/CD | GitHub Actions |
+| Image Registry | Docker Hub |
+| Deployment | 새로 구성한 K3s, Kubernetes Deployment / Service |
+| Application | Spring Boot, MySQL |
+
+### Completion Criteria
+
+- [ ] GitHub Actions에서 테스트가 자동으로 실행됨
+- [ ] 커밋 또는 태그로 식별되는 Docker 이미지가 Docker Hub에 등록됨
+- [ ] GitHub Actions가 새 이미지를 새로 구성한 K3s 환경에 자동 배포함
+- [ ] 배포된 앱의 User CRUD와 MySQL 연결이 정상 동작함
+- [ ] 장애 테스트 API 활성화 설정을 적용하고 호출할 수 있음
+- [ ] 배포 상태 확인과 실패 시 롤백 절차를 검증함
+
+## Stage 2. Observability and HPA Validation
+
+새로 구성한 K3s에 배포한 OpsPilot으로 CPU·메모리 부하를 만들고 Pod 수 변화를 확인합니다. 기본 nginx 대신 장애 테스트 API를 사용해 부하의 종류와 지속 시간을 조절합니다.
+
+### Monitoring and Logging
+
+- Metrics Server로 HPA에 필요한 CPU / 메모리 리소스 메트릭 수집
+- 경량 Prometheus로 애플리케이션과 노드 메트릭 수집
+- Grafana로 핵심 지표 중심의 대시보드 구성
+- 애플리케이션 로그와 컨테이너 로그 수집
+- CPU, 메모리, 요청 수, 응답 시간, 에러율 관측
+- 장애 상황을 확인할 수 있는 알림 기준 정의
+
+### HPA Validation
+
+- CPU 및 메모리 기반 HPA 구성과 Pod requests / limits 설정
+- `FAULT_TESTS_ENABLED=true`로 테스트 API 활성화
+- `/api/test/cpu`와 `/api/test/memory`를 각각 반복 호출해 부하 유지
+- 리소스 사용량, Pod 증가·축소, 확장 소요 시간과 최대 Pod 수 기록
+- 부하 중단 후 메모리 사용량과 Pod 수가 안정화되는 과정 확인
+
+현재 CPU 테스트는 한 스레드를 사용하고, 메모리 테스트는 요청당 최대 128MiB를 보유합니다. CPU·메모리 테스트는 Pod당 합계 한 요청만 실행되므로 중복 요청의 429도 부하 결과에 기록합니다. 메모리는 요청 종료 후 GC 대상이 됩니다. 이 구현 범위에 맞춰 requests / limits와 부하 지속 시간을 정하고, 실제 사용량이 HPA 목표에 도달하는지 확인합니다.
+
+### Tech Stack
+
+| 영역 | 기술 |
+| --- | --- |
+| Scaling | Kubernetes HPA |
+| HPA Metrics | Kubernetes Metrics Server |
+| Load Source | OpsPilot CPU / Memory 테스트 API |
+| Metrics | Lightweight Prometheus |
+| Dashboard | Grafana |
+| Logging | Kubernetes / Container Logging |
+
+### Completion Criteria
+
+- [ ] Metrics Server에서 HPA용 CPU / 메모리 메트릭을 수집함
+- [ ] CPU / 메모리 requests와 limits를 설정함
+- [ ] Prometheus에서 애플리케이션과 Kubernetes 메트릭을 수집함
+- [ ] Grafana에서 요청 수, 응답 시간, 에러율, CPU, 메모리를 확인함
+- [ ] CPU·메모리 부하 시나리오별로 HPA의 Pod 확장을 확인함
+- [ ] 부하 감소 후 Pod가 설정된 최소 개수까지 축소됨
+- [ ] 확장·축소 소요 시간과 자원 사용량을 기록함
+- [ ] 주요 장애 상황의 로그와 알림 기준이 정의됨
+
+## Stage 3. Infrastructure as Code
+
+새로 구성한 K3s에서 앱 배포와 HPA 검증을 마친 뒤 인프라를 코드화합니다. `t3.small` 인스턴스 1개를 최소 목표 구성으로 삼아 현재 환경과 비교하고, Terraform 관리 대상과 K3s 설치·설정 절차를 정리합니다.
 
 ### Terraform
 
+- 기존 AWS 자원의 import 또는 별도 환경 재구성 계획 수립
 - AWS 리소스를 코드로 관리
 - `t3.small` EC2 인스턴스 1개 구성
 - 네트워크와 보안 그룹 구성
@@ -247,94 +336,9 @@ docker compose down
 - [ ] 외부 요청이 애플리케이션 Service까지 도달함
 - [ ] 장애 발생 시 Kubernetes 리소스 상태와 로그로 원인을 확인할 수 있음
 
-## Stage 2. CI/CD and Observability
-
-코드 변경이 테스트, 이미지 빌드, Docker Hub push, K3s 배포로 이어지는 CI/CD를 구축합니다. HPA와 DR 검증의 전제인 모니터링은 제외하지 않고, 단일 인스턴스에서도 동작할 수 있도록 경량 구성으로 운영합니다.
-
-### CI/CD
-
-- GitHub Actions로 테스트 자동화
-- Docker 이미지 빌드 및 Docker Hub push
-- 커밋 또는 태그 기반 이미지 버전 관리
-- GitHub Actions에서 K3s 배포 단계 자동화
-- 배포 실패 시 원인 확인과 롤백 절차 검증
-- Jenkins는 별도 서버 비용과 운영 부담을 고려해 초기 구성에서 사용하지 않음
-
-### CD Strategy
-
-```text
-GitHub Actions
-     |-- Test
-     |-- Build Docker Image
-     |-- Push Image to Docker Hub
-     `-- Deploy with kubectl / SSH
-                                   |
-                                   v
-                         K3s Cluster
-```
-
-현재 규모에서는 Jenkins를 별도로 띄우기보다 GitHub Actions를 CI/CD에 함께 사용합니다. Jenkins는 파이프라인이 복잡해지거나 self-hosted 실행 환경과 세밀한 권한 관리가 필요해질 때 검토합니다.
-
-### Monitoring and Logging
-
-- Metrics Server로 HPA에 필요한 CPU / 메모리 리소스 메트릭 수집
-- 경량 Prometheus로 애플리케이션과 노드 메트릭 수집
-- Grafana로 핵심 지표 중심의 대시보드 구성
-- 애플리케이션 로그와 컨테이너 로그 수집
-- CPU, 메모리, 요청 수, 응답 시간, 에러율 관측
-- 장애 상황을 확인할 수 있는 알림 기준 정의
-
-### Delivery Flow
-
-```text
-Git Push
-     |
-     v
-GitHub Actions
-     |-- Test
-     |-- Build Docker Image
-     |-- Push Image to Docker Hub
-     v
-K3s Deployment
-     |-- Rollout Status Check
-     |-- Rollback on Failure
-     v
-Prometheus / Grafana
-```
-
-### Tech Stack
-
-| 영역 | 기술 |
-| --- | --- |
-| CI/CD | GitHub Actions |
-| Image Registry | Docker Hub |
-| HPA Metrics | Kubernetes Metrics Server |
-| Metrics | Lightweight Prometheus |
-| Dashboard | Lightweight Grafana |
-| Logging | Kubernetes / Container Logging |
-| Deployment | K3s, Kubernetes |
-
-### Completion Criteria
-
-- [ ] GitHub Actions에서 테스트가 자동으로 실행됨
-- [ ] Docker 이미지가 커밋 또는 태그 기준으로 Docker Hub에 등록됨
-- [ ] GitHub Actions가 새 이미지를 K3s 환경에 자동 배포함
-- [ ] 배포 성공 여부와 롤백 절차를 확인할 수 있음
-- [ ] Metrics Server에서 HPA용 CPU / 메모리 메트릭을 수집함
-- [ ] 경량 Prometheus에서 애플리케이션과 Kubernetes 메트릭을 수집함
-- [ ] Grafana에서 요청 수, 응답 시간, 에러율, CPU, 메모리를 확인함
-- [ ] 주요 장애 상황에 대한 로그와 알림 기준이 정의됨
-
-## Stage 3. Advanced Operations
+## Stage 4. Disaster Recovery
 
 EC2 인스턴스를 AZ-A와 AZ-B에 각각 1대씩 추가하고, 데이터베이스는 AWS RDS MySQL로 분리합니다. AZ-A에는 K3s 관리 노드, 모니터링, 애플리케이션을 배치하고 RDS MySQL의 기본 배치 영역도 AZ-A로 구성합니다. AZ-B에는 애플리케이션만 배치합니다. 이 단계에서는 AZ-B를 단절시킨 뒤 AZ-A 애플리케이션으로 failover되는지 검증합니다.
-
-### HPA Validation
-
-- CPU 및 메모리 기반 Horizontal Pod Autoscaler 구성
-- 부하를 주어 Pod 증가와 축소 동작 검증
-- 확장까지 걸리는 시간과 최대 Pod 수 측정
-- 리소스 requests / limits와 HPA 동작의 관계 확인
 
 ### Disaster Recovery Test
 
@@ -358,8 +362,6 @@ EC2 인스턴스를 AZ-A와 AZ-B에 각각 1대씩 추가하고, 데이터베이
 
 | 영역 | 기술 |
 | --- | --- |
-| Scaling | Kubernetes HPA |
-| Load Test | 부하 테스트 도구 |
 | Recovery | Application Failover |
 | Observability | Prometheus, Grafana, Logging |
 | Infrastructure | Terraform, AWS, K3s, EC2, AZ |
@@ -368,9 +370,6 @@ EC2 인스턴스를 AZ-A와 AZ-B에 각각 1대씩 추가하고, 데이터베이
 
 ### Completion Criteria
 
-- [ ] 부하 증가에 따라 HPA가 Pod를 확장함
-- [ ] 부하 감소 후 Pod가 설정된 최소 개수까지 축소됨
-- [ ] CPU / 메모리 requests와 limits가 HPA 기준에 맞게 설정됨
 - [ ] 애플리케이션 Pod 삭제 후 서비스가 자동으로 복구됨
 - [ ] 노드 장애 또는 재배포 후 서비스가 정상화됨
 - [ ] AZ-A와 AZ-B에 EC2 인스턴스가 각각 1대씩 구성됨
@@ -392,9 +391,9 @@ EC2 인스턴스를 AZ-A와 AZ-B에 각각 1대씩 추가하고, 데이터베이
 ├─ docker-compose.yml       # Local application + MySQL
 ├─ dockerfile               # Multi-stage application image
 ├─ build.gradle             # Gradle dependencies and tasks
-├─ terraform/               # Stage 1: AWS infrastructure (planned)
+├─ terraform/               # Stage 3: AWS infrastructure as code (planned)
 ├─ k8s/                     # Stage 1: K3s manifests (planned)
-├─ .github/workflows/       # Stage 2: GitHub Actions (planned)
+├─ .github/workflows/       # Stage 1: GitHub Actions (planned)
 └─ monitoring/              # Stage 2: Prometheus / Grafana (planned)
 ```
 
@@ -414,7 +413,9 @@ K3s Deployment
      |-- Grafana Dashboard
      |-- HPA Scaling
      v
-Failure / Recovery Test
+Terraform Infrastructure as Code
+     v
+Multi-AZ / DR Test
 ```
 
 ## Ownership

@@ -180,10 +180,10 @@ Data:    AZ-A/B Application -> RDS MySQL (primary / preferred AZ-A)
 프로젝트 루트에 `.env` 파일을 생성합니다. `.env`는 Git에 커밋하지 않습니다.
 
 ```dotenv
-DB_ROOT_PASSWORD=opspilot
+DB_ROOT_PASSWORD=<your-root-password>
 DB_NAME=opspilot
-DB_USERNAME=opspilot
-DB_PASSWORD=opspilot
+DB_USERNAME=<your-db-username>
+DB_PASSWORD=<your-db-password>
 SPRING_PROFILES_ACTIVE=local
 ```
 
@@ -205,7 +205,63 @@ docker compose down
 ./gradlew test
 ```
 
-## Stage 1. CI/CD and Application Deployment
+### User CRUD 및 장애 테스트 API
+
+기존 `/hello/`와 controller → service → repository 구조를 유지합니다. User는 `id`, `name`을 가지며 기존 `HelloRepository`를 재사용하고 MySQL `users` 테이블에 저장합니다. 이름은 공백이 아닌 1~100자입니다.
+
+| Method | Endpoint | 동작 |
+| --- | --- | --- |
+| GET | `/hello/` | 기존 hello 응답 |
+| POST | `/api/users` | `{"name":"Alice"}` 생성, 201 및 Location |
+| GET | `/api/users` | ID 순 전체 조회 |
+| GET | `/api/users/{id}` | 단건 조회 |
+| PUT | `/api/users/{id}` | `{"name":"Bob"}` 이름 변경 |
+| DELETE | `/api/users/{id}` | 삭제, 204 |
+| POST | `/api/test/latency?durationMs=1000` | 요청 스레드 대기 |
+| POST | `/api/test/cpu?durationMs=1000` | 요청 스레드에서 CPU 연산 |
+| POST | `/api/test/memory?sizeMb=32&durationMs=1000` | 메모리 할당·쓰기 후 지정 시간 보유 |
+| POST | `/api/test/error` | 의도적인 HTTP 500 |
+
+없는 User는 404, 유효하지 않은 본문·파라미터는 400을 반환합니다. 장애 API는 기본 비활성화(404)이며 `.env`에 `FAULT_TESTS_ENABLED=true`를 추가하면 Compose에서 활성화됩니다. 호스트에서 실행할 때는 환경변수로 전달합니다.
+
+```bash
+FAULT_TESTS_ENABLED=true ./gradlew bootRun
+curl -i -X POST http://localhost:8080/api/users -H 'Content-Type: application/json' -d '{"name":"Alice"}'
+curl -X POST 'http://localhost:8080/api/test/latency?durationMs=1000'
+curl -X POST 'http://localhost:8080/api/test/cpu?durationMs=5000'
+curl -X POST 'http://localhost:8080/api/test/memory?sizeMb=64&durationMs=10000'
+curl -i -X POST http://localhost:8080/api/test/error
+```
+
+`durationMs`는 1~30,000ms(기본 1,000ms), `sizeMb`는 1~128MiB(기본 32MiB)입니다. CPU·메모리 테스트는 인스턴스당 합계 한 요청만 실행하며 중복 요청은 429를 반환합니다. CPU는 한 스레드를 사용하고 latency는 동시 요청이 가능합니다. 메모리는 요청 종료 후 GC 대상이 되므로 힙 사용량이 즉시 내려가지는 않습니다. 장애 API를 켠 환경은 테스트용 접근으로 제한합니다.
+
+MySQL 연결은 `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD` 또는 Spring datasource 환경변수로 설정합니다. DB 이름·사용자명·비밀번호에는 기본값이 없으며, 필수 설정이 누락되면 시작에 실패합니다. Compose는 필수 DB 환경변수가 누락되거나 비어 있으면 실행 전에 오류를 반환합니다. `SERVER_PORT`의 기본값은 8080입니다. 로컬/Compose의 테이블 초기화는 `DDL_AUTO=update`이며, 운영 스키마를 별도 관리할 때는 `DDL_AUTO=validate`를 사용합니다. 호스트의 `bootRun`은 `.env`를 자동으로 읽지 않으므로 필요한 환경변수를 직접 설정합니다.
+
+### Actuator 및 Prometheus
+
+| Endpoint | 용도 |
+| --- | --- |
+| `/actuator/health` | DB를 포함한 상태 확인 |
+| `/actuator/health/liveness` | 프로세스 생존 상태 |
+| `/actuator/health/readiness` | 요청 수신 준비 상태 |
+| `/actuator/info` | 애플리케이션 정보(현재 빈 객체) |
+| `/actuator/metrics` | 메트릭 목록 및 `/metrics/{name}` 조회 |
+| `/actuator/prometheus` | Prometheus scrape |
+
+[Spring Boot 공식 metrics 문서](https://docs.spring.io/spring-boot/reference/actuator/metrics.html)에 따른 Actuator와 Micrometer Prometheus registry를 사용합니다. JVM 메모리, CPU 및 HTTP 요청 메트릭을 노출하고 HTTP 응답 시간 histogram을 활성화합니다. 기본 readiness는 DB 상태를 포함하지 않습니다.
+
+```yaml
+# Prometheus 설정 예시: Compose 네트워크 내부에서는 app:8080 사용
+scrape_configs:
+  - job_name: opspilot
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['localhost:8080']
+```
+
+`./gradlew test`는 별도의 `test` 프로필과 H2 MySQL 호환 모드로 실행되어 외부 MySQL 없이 CRUD 전체 흐름, 입력 오류, 장애 API, 비활성화 설정, Actuator를 검증합니다. 실제 MySQL 호환성 검증은 `docker compose up --build` 후 위 CRUD 요청으로 수행합니다.
+
+## Stage 1. Infrastructure and K3s and CI/CD and Application Deployment
 
 코드 변경이 테스트, 이미지 빌드, Docker Hub push, 새로 구성한 K3s 배포로 이어지는 CI/CD를 구축합니다. CPU·메모리 부하를 직접 발생시킬 수 있는 OpsPilot을 먼저 배포해 다음 단계의 HPA 검증에 사용합니다.
 

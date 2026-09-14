@@ -1,0 +1,21 @@
+# Local build artifacts
+build/
+.gradle/
+
+# Git / IDE / OS files
+.git/
+.gitignore
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Logs and local secrets
+*.log
+logs/
+.env
+.env.*
+application-local.yml
+application-local.yaml
+application-secret.yml
+application-secret.yaml

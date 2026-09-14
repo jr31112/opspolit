@@ -146,7 +146,7 @@ Data:    AZ-A/B Application -> RDS MySQL (primary / preferred AZ-A)
 
 ## Stage 0. Application Baseline
 
-현재 완료된 애플리케이션 기반 단계입니다. 로컬 테스트까지 완료했으며, Docker 컨테이너는 실행이 필요한 시점에 `docker compose up --build`로 구동합니다.
+`docker compose up --build`로 구동합니다.
 
 ### Application
 

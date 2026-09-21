@@ -496,3 +496,23 @@ Codex
          ├─ DR
          └─ 비용 최적화
 ```
+
+## Request Logging and Exception Handling
+
+MVC 인터셉터가 요청 완료 시 콘솔에 `requestId`, `startedAt`(UTC), HTTP `method`, `path`, `status`, `latencyMs`를 기록합니다. `latencyMs`는 인터셉터 진입부터 응답 처리 완료까지의 경과 시간이며 클라이언트 네트워크 왕복시간은 포함하지 않습니다. 쿼리 문자열과 요청 본문은 이 접근 로그에 기록하지 않습니다.
+
+`X-Request-ID` 헤더는 영문·숫자·`.`·`_`·`-`로 구성된 1~128자이면 사용하고, 없거나 유효하지 않으면 UUID를 생성합니다. 응답 헤더에 같은 ID를 반환하며 동기 요청 처리 중의 애플리케이션 로그에도 MDC로 추가합니다. 비동기 작업 스레드로의 MDC 전파는 별도 설정이 필요합니다.
+
+전역 예외 핸들러는 Spring MVC의 HTTP 상태와 헤더를 유지하며 Problem Detail JSON에 `requestId`를 추가합니다. 4xx는 WARN, 5xx는 스택 트레이스와 함께 ERROR로 기록합니다. 5xx 응답에는 내부 예외 메시지를 노출하지 않습니다. 핸들러 매핑 전 발생한 오류는 인터셉터 접근 로그 대상이 아니지만 전역 예외 핸들러에서 처리되면 요청 ID와 예외 로그를 남깁니다. 서블릿 필터·컨테이너 단계 오류는 이 MVC 처리 범위에 포함되지 않습니다.
+
+```text
+startedAt=2026-09-21T00:00:00Z level=INFO requestId=demo-123 method=POST path=/api/test/latency status=200 latencyMs=1002.5 exception=-
+```
+
+```bash
+curl -i -H 'X-Request-ID: demo-123' http://localhost:8080/hello/
+```
+
+로그는 표준 출력으로 기록합니다. 외부 로그 수집 서버나 Kubernetes 로그 수집기는 이 애플리케이션 변경에 포함하지 않습니다.
+
+요청 완료와 예외 로그는 공통 포맷 `startedAt level requestId method path status latencyMs exception`을 같은 순서로 사용합니다. 요청 완료는 INFO, 4xx 예외는 WARN, 5xx 예외는 ERROR 레벨로 구분하며 예외가 없으면 `exception=-`입니다. 예외 로그의 latency는 예외 처리 시점까지, 완료 로그는 응답 처리 완료까지 측정합니다. 인터셉터 진입 전 오류는 측정할 시작 시각이 없으므로 `startedAt=-`, `latencyMs=-`로 표시합니다.

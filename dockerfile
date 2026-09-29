@@ -16,5 +16,9 @@ WORKDIR /app
 
 COPY --from=builder /app/build/libs/*.jar app.jar
 
+# Pin the agent version and include it in the runtime image.
+ARG OTEL_AGENT_VERSION=2.31.1
+ADD https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v${OTEL_AGENT_VERSION}/opentelemetry-javaagent.jar /app/opentelemetry-javaagent.jar
+
 EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+ENTRYPOINT ["java", "-javaagent:/app/opentelemetry-javaagent.jar", "-jar", "/app/app.jar"]

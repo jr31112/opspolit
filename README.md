@@ -516,3 +516,30 @@ curl -i -H 'X-Request-ID: demo-123' http://localhost:8080/hello/
 로그는 표준 출력으로 기록합니다. 외부 로그 수집 서버나 Kubernetes 로그 수집기는 이 애플리케이션 변경에 포함하지 않습니다.
 
 요청 완료와 예외 로그는 공통 포맷 `startedAt level requestId method path status latencyMs exception`을 같은 순서로 사용합니다. 요청 완료는 INFO, 4xx 예외는 WARN, 5xx 예외는 ERROR 레벨로 구분하며 예외가 없으면 `exception=-`입니다. 예외 로그의 latency는 예외 처리 시점까지, 완료 로그는 응답 처리 완료까지 측정합니다. 인터셉터 진입 전 오류는 측정할 시작 시각이 없으므로 `startedAt=-`, `latencyMs=-`로 표시합니다.
+
+## Redis Sentinel
+
+Spring Data Redis와 Lettuce로 Sentinel에 연결합니다. 설정은 `application.yaml`에 통합되어 별도 `redis-sentinel` 프로필이 필요하지 않습니다. 캐시나 세션 기능은 추가하지 않으며 `StringRedisTemplate`을 주입해 사용할 수 있습니다.
+
+```dotenv
+REDIS_SENTINEL_MASTER=mymaster
+REDIS_SENTINEL_1=<sentinel-1 주소>:26379
+REDIS_SENTINEL_2=<sentinel-2 주소>:26379
+REDIS_SENTINEL_3=<sentinel-3 주소>:26379
+REDIS_SENTINEL_USERNAME=
+REDIS_SENTINEL_PASSWORD=
+REDIS_USERNAME=
+REDIS_PASSWORD=
+REDIS_DATABASE=0
+REDIS_SSL_ENABLED=false
+REDIS_CONNECT_TIMEOUT=2s
+REDIS_TIMEOUT=2s
+```
+
+master 이름과 Sentinel 주소 3개는 필수입니다. `REDIS_SENTINEL_USERNAME/PASSWORD`는 Sentinel 인증, `REDIS_USERNAME/PASSWORD`는 Redis 데이터 노드 인증입니다. 인증이 없으면 비워둡니다. 비밀번호는 배포 환경의 Secret으로 주입합니다.
+
+Compose는 외부 Sentinel을 사용하며 Redis 컨테이너를 생성하지 않습니다. 앱의 `.env`에 위 값을 넣습니다. IDE와 `bootRun`은 `.env`를 자동으로 읽지 않으므로 실행 환경변수로 전달해야 합니다. 앱에서 Sentinel 주소뿐 아니라 Sentinel이 반환하는 Redis 노드 주소에도 접근할 수 있어야 합니다. `SPRING_DATA_REDIS_URL`이나 별도 연결 Bean을 함께 설정하지 않습니다.
+
+Redis 상태는 기본 Actuator health에 포함되므로 연결 실패 시 전체 health도 DOWN이 될 수 있습니다. liveness/readiness 설정은 기존대로 유지합니다. 테스트 프로필은 테스트용 Sentinel 주소와 비활성화된 Redis health를 사용해 외부 Redis 없이 실행됩니다. 설정 바인딩·인증 분리를 검증하며 실제 연결·failover는 별도 환경 검증이 필요합니다.
+
+참고: [Spring Boot Redis 공식 문서](https://docs.spring.io/spring-boot/reference/data/nosql.html#data.nosql.redis).

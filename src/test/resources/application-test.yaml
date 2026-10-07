@@ -11,6 +11,9 @@ opspilot:
   faults:
     enabled: true
 management:
+  health:
+    redis:
+      enabled: false
   endpoints:
     web:
       exposure:

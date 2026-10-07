@@ -516,3 +516,31 @@ curl -i -H 'X-Request-ID: demo-123' http://localhost:8080/hello/
 로그는 표준 출력으로 기록합니다. 외부 로그 수집 서버나 Kubernetes 로그 수집기는 이 애플리케이션 변경에 포함하지 않습니다.
 
 요청 완료와 예외 로그는 공통 포맷 `startedAt level requestId method path status latencyMs exception`을 같은 순서로 사용합니다. 요청 완료는 INFO, 4xx 예외는 WARN, 5xx 예외는 ERROR 레벨로 구분하며 예외가 없으면 `exception=-`입니다. 예외 로그의 latency는 예외 처리 시점까지, 완료 로그는 응답 처리 완료까지 측정합니다. 인터셉터 진입 전 오류는 측정할 시작 시각이 없으므로 `startedAt=-`, `latencyMs=-`로 표시합니다.
+
+## Redis Connection
+
+Spring Data Redis와 Lettuce의 자동 설정을 사용합니다. 연결 기반만 추가하며 User 캐시나 세션 저장 동작은 변경하지 않습니다. 필요한 서비스에서 `StringRedisTemplate`을 생성자 주입해 사용할 수 있습니다.
+
+```dotenv
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DATABASE=0
+REDIS_USERNAME=
+REDIS_PASSWORD=
+REDIS_SSL_ENABLED=false
+REDIS_CONNECT_TIMEOUT=2s
+REDIS_TIMEOUT=2s
+```
+
+호스트에서 실행할 때는 IDE 실행 설정 또는 셸 환경변수로 전달합니다. `bootRun`은 `.env`를 자동으로 읽지 않습니다. 운영 환경에서는 Redis 서버에 맞는 인증 정보와 TLS 설정을 주입합니다.
+
+Docker Compose에는 개발용 Redis가 포함되며 앱은 `redis:6379`로 연결합니다. Compose는 로컬 Redis에 맞춰 사용자명·비밀번호를 비우고 TLS를 비활성화합니다. 외부 Redis를 사용하려면 이 override와 `depends_on` 설정을 조정해야 합니다. 로컬 Redis 포트는 `127.0.0.1:6379`에만 공개하며 별도 영속 볼륨은 설정하지 않습니다.
+
+```bash
+docker compose up -d redis
+docker compose exec redis redis-cli ping
+```
+
+Redis 상태는 기본 Actuator health에 포함됩니다. 서버에 연결할 수 없으면 전체 health도 DOWN이 될 수 있습니다. 기존 liveness/readiness 그룹 설정은 변경하지 않습니다. `test` 프로필에서는 외부 Redis 없이 기존 API 테스트를 실행하기 위해 Redis health만 비활성화하며, 실제 Redis 연결 검증은 별도로 필요합니다.
+
+참고: [Spring Boot Redis 공식 문서](https://docs.spring.io/spring-boot/reference/data/nosql.html#data.nosql.redis).

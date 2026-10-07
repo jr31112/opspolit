@@ -1,4 +1,12 @@
 spring:
+  data:
+    redis:
+      sentinel:
+        master: ${REDIS_SENTINEL_MASTER:test-master}
+        nodes:
+          - ${REDIS_SENTINEL_1:localhost:26379}
+          - ${REDIS_SENTINEL_2:localhost:26380}
+          - ${REDIS_SENTINEL_3:localhost:26381}
   datasource:
     url: jdbc:h2:mem:opspilot;MODE=MySQL;DB_CLOSE_DELAY=-1
     username: sa
